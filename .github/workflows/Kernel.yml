@@ -1,0 +1,225 @@
+name: Build Kernel (devon - SM6225)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Criar release no GitHub?'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+
+    steps:
+      # ────────────────────────────────────────────────────────────
+      # 1. Checkout do kernel source (shallow para economizar tempo)
+      # ────────────────────────────────────────────────────────────
+      - name: Checkout Kernel Source
+        uses: actions/checkout@v4
+        with:
+          repository: Dark3090/kernel_motorola_sm6225
+          ref: lineage-23.2
+          path: kernel
+          fetch-depth: 1
+
+      # ────────────────────────────────────────────────────────────
+      # 2. Checkout do AnyKernel3 (osm0sis oficial)
+      # ────────────────────────────────────────────────────────────
+      - name: Checkout AnyKernel3
+        uses: actions/checkout@v4
+        with:
+          repository: osm0sis/AnyKernel3
+          path: AnyKernel3
+          fetch-depth: 1
+
+      # ────────────────────────────────────────────────────────────
+      # 3. Dependências do sistema
+      # ────────────────────────────────────────────────────────────
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache curl flex \
+            git gnupg gzip libelf-dev libssl-dev \
+            lz4 make python3 python3-pip zip unzip
+
+      # ────────────────────────────────────────────────────────────
+      # 4. Download Proton Clang 13 (toolchain comprovado)
+      # ────────────────────────────────────────────────────────────
+      - name: Download Proton Clang 13
+        run: |
+          mkdir -p $HOME/toolchains/proton-clang
+          curl -sL "https://github.com/kdrag0n/proton-clang/archive/refs/heads/master.tar.gz" \
+            | tar -xz --strip-components=1 -C $HOME/toolchains/proton-clang
+          echo "CLANG_PATH=$HOME/toolchains/proton-clang/bin" >> $GITHUB_ENV
+
+      # ────────────────────────────────────────────────────────────
+      # 5. Variáveis de build
+      # ────────────────────────────────────────────────────────────
+      - name: Set Build Variables
+        run: |
+          echo "ARCH=arm64"                              >> $GITHUB_ENV
+          echo "SUBARCH=arm64"                           >> $GITHUB_ENV
+          echo "DEFCONFIG=vendor/bengal-perf_defconfig" >> $GITHUB_ENV
+          echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel"    >> $GITHUB_ENV
+          echo "OUT_DIR=$GITHUB_WORKSPACE/out"          >> $GITHUB_ENV
+          echo "KBUILD_BUILD_USER=Dark3090"             >> $GITHUB_ENV
+          echo "KBUILD_BUILD_HOST=github-actions"       >> $GITHUB_ENV
+          DATE=$(date +%Y%m%d-%H%M)
+          echo "BUILD_DATE=$DATE"                       >> $GITHUB_ENV
+          echo "ZIP_NAME=DarkKernel-devon-KSU-${DATE}.zip" >> $GITHUB_ENV
+
+      # ────────────────────────────────────────────────────────────
+      # 6. Configurar defconfig (olddefconfig evita prompts)
+      # ────────────────────────────────────────────────────────────
+      - name: Configure Kernel
+        run: |
+          mkdir -p $OUT_DIR
+          cd $KERNEL_DIR
+          make O=$OUT_DIR                                 \
+            ARCH=$ARCH                                    \
+            CC=$CLANG_PATH/clang                          \
+            CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu-              \
+            $DEFCONFIG
+          make O=$OUT_DIR                                 \
+            ARCH=$ARCH                                    \
+            CC=$CLANG_PATH/clang                          \
+            CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu-              \
+            olddefconfig
+
+      # ────────────────────────────────────────────────────────────
+      # 7. Compilar apenas Image.gz
+      #    (dtbo excluído — causa falha de compilação no bengal)
+      # ────────────────────────────────────────────────────────────
+      - name: Build Kernel (Image.gz only)
+        run: |
+          cd $KERNEL_DIR
+          make O=$OUT_DIR                                 \
+            ARCH=$ARCH                                    \
+            CC=$CLANG_PATH/clang                          \
+            CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
+            CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
+            CLANG_TRIPLE=aarch64-linux-gnu-              \
+            LD=$CLANG_PATH/ld.lld                         \
+            AR=$CLANG_PATH/llvm-ar                        \
+            NM=$CLANG_PATH/llvm-nm                        \
+            OBJCOPY=$CLANG_PATH/llvm-objcopy              \
+            OBJDUMP=$CLANG_PATH/llvm-objdump              \
+            STRIP=$CLANG_PATH/llvm-strip                  \
+            LLVM=1                                        \
+            LLVM_IAS=1                                    \
+            -j$(nproc --all)                              \
+            Image.gz
+
+      # ────────────────────────────────────────────────────────────
+      # 8. Verificar se o binário foi gerado
+      # ────────────────────────────────────────────────────────────
+      - name: Verify Build Output
+        run: |
+          IMAGE="$OUT_DIR/arch/arm64/boot/Image.gz"
+          if [ ! -f "$IMAGE" ]; then
+            echo "ERRO: Image.gz não foi gerado!"
+            exit 1
+          fi
+          echo "Image.gz gerado com sucesso:"
+          ls -lh "$IMAGE"
+
+      # ────────────────────────────────────────────────────────────
+      # 9. Montar pacote AnyKernel3
+      # ────────────────────────────────────────────────────────────
+      - name: Package with AnyKernel3
+        run: |
+          IMAGE="$OUT_DIR/arch/arm64/boot/Image.gz"
+          AK3_DIR="$GITHUB_WORKSPACE/AnyKernel3"
+
+          # Configurar anykernel.sh para o devon
+          cat > $AK3_DIR/anykernel.sh << 'EOF'
+          # AnyKernel3 - Moto G32/G42/G52 (devon) - SM6225
+          properties() { '
+          kernel.string=DarkKernel (KernelSU) by Dark3090
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=devon
+          device.name2=moto_g32
+          device.name3=moto_g42
+          device.name4=moto_g52
+          supported.versions=12-15
+          '; }
+
+          block=/dev/block/bootdevice/by-name/boot;
+          is_slot_device=1;
+          ramdisk_compression=auto;
+          patch_vbmeta_flag=auto;
+
+          . tools/ak3-core.sh;
+          . $patch;
+          flash_boot;
+          EOF
+
+          # Copiar o kernel
+          cp "$IMAGE" "$AK3_DIR/Image.gz"
+
+          # Remover arquivos desnecessários
+          rm -f "$AK3_DIR/Image.gz-dtb" "$AK3_DIR/Image" "$AK3_DIR/zImage" 2>/dev/null || true
+
+          # Criar o zip
+          cd "$AK3_DIR"
+          zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" * \
+            -x ".git/*" -x "README.md" -x "*placeholder"
+
+          echo "Zip criado: $GITHUB_WORKSPACE/$ZIP_NAME"
+          ls -lh "$GITHUB_WORKSPACE/$ZIP_NAME"
+
+      # ────────────────────────────────────────────────────────────
+      # 10. Upload como artifact (sempre disponível)
+      # ────────────────────────────────────────────────────────────
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ZIP_NAME }}
+          path: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+          retention-days: 7
+
+      # ────────────────────────────────────────────────────────────
+      # 11. (Opcional) Criar GitHub Release
+      # ────────────────────────────────────────────────────────────
+      - name: Create GitHub Release
+        if: ${{ github.event.inputs.release == 'true' }}
+        uses: ncipollo/release-action@v1
+        with:
+          tag: kernel-${{ env.BUILD_DATE }}
+          name: DarkKernel Devon KSU - ${{ env.BUILD_DATE }}
+          body: |
+            ## DarkKernel para Moto G32/G42/G52 (devon)
+
+            **KernelSU:** Integrado nativamente no source  
+            **Toolchain:** Proton Clang 13  
+            **Defconfig:** vendor/bengal-perf_defconfig  
+            **Branch:** lineage-23.2  
+
+            ### Como instalar
+            **Método 1 (TWRP/recovery):** Flash do `.zip` via recovery  
+            **Método 2 (recomendado se TWRP der problema):**  
+            Extraia o `Image.gz`, descompacte para `Image`, use `magiskboot` ou `fastboot flash boot`
+
+            ⚠️ Faça backup do boot.img original antes!
+          artifacts: ${{ github.workspace }}/${{ env.ZIP_NAME }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          draft: false
+          prerelease: false
