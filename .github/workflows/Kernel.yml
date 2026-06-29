@@ -147,29 +147,28 @@ jobs:
 
           # Configurar anykernel.sh para o devon
           cat > $AK3_DIR/anykernel.sh << 'EOF'
-          # AnyKernel3 - Moto G32/G42/G52 (devon) - SM6225
+          # AnyKernel3 - DarkKernel - Moto G32 (devon) SM6225
           properties() { '
-          kernel.string=DarkKernel (KernelSU) by Dark3090
+          kernel.string=DarkKernel by Dark3090
           do.devicecheck=1
           do.modules=0
           do.systemless=1
           do.cleanup=1
           do.cleanuponabort=0
           device.name1=devon
-          device.name2=moto_g32
-          device.name3=moto_g42
-          device.name4=moto_g52
-          supported.versions=12-15
+          device.name2=moto g32
+          supported.versions=
           '; }
 
-          block=/dev/block/bootdevice/by-name/boot;
+          block=/dev/block/platform/soc/7c4000.sdhci/by-name/boot;
           is_slot_device=1;
           ramdisk_compression=auto;
           patch_vbmeta_flag=auto;
 
           . tools/ak3-core.sh;
           . $patch;
-          flash_boot;
+          flasdevon
+                t;
           EOF
 
           # Copiar o kernel
