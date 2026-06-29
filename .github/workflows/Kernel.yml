@@ -156,19 +156,25 @@ jobs:
           do.cleanup=1
           do.cleanuponabort=0
           device.name1=devon
-          device.name2=moto g32
           supported.versions=
+          supported.patchlevels=
+          supported.vendorpatchlevels=
           '; }
 
-          block=/dev/block/platform/soc/7c4000.sdhci/by-name/boot;
-          is_slot_device=1;
-          ramdisk_compression=auto;
-          patch_vbmeta_flag=auto;
+          boot_attributes() {
+          set_perm_recursive 0 0 755 644 $RAMDISK/*;
+          set_perm_recursive 0 0 750 750 $RAMDISK/init* $RAMDISK/sbin;
+          }
+
+          BLOCK=/dev/block/by-name/boot;
+          IS_SLOT_DEVICE=1;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
 
           . tools/ak3-core.sh;
-          . $patch;
-          flasdevon
-                t;
+
+          dump_boot;
+          write_boot;
           EOF
 
           # Copiar o kernel
