@@ -20,9 +20,6 @@ jobs:
       contents: write
 
     steps:
-      # ────────────────────────────────────────────────────────────
-      # 1. Checkout do kernel source
-      # ────────────────────────────────────────────────────────────
       - name: Checkout Kernel Source
         uses: actions/checkout@v4
         with:
@@ -67,226 +64,74 @@ jobs:
           echo "ZIP_NAME=DarkKernel-devon-DEBUG-${DATE}.zip" >> $GITHUB_ENV
 
       # ────────────────────────────────────────────────────────────
-      # IMPORTANTE: O build oficial da Motorola usa TRÊS configs
-      # combinados via merge_config.sh, não só o defconfig principal:
-      #   vendor/bengal-perf_defconfig
-      #   vendor/debugfs.config
-      #   vendor/ext_config/moto-bengal.config  <- configs específicos
-      #     do devon (câmera, flash, etc) ficam aqui
-      # Fonte: BoardConfigCommon.mk do device tree oficial
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO] Localizar todos os arquivos de config relevantes"
-        run: |
-          cd $KERNEL_DIR
-          echo "── Procurando bengal-perf_defconfig ──"
-          find arch/arm64/configs -iname "bengal-perf_defconfig"
-          echo ""
-          echo "── Procurando debugfs.config ──"
-          find arch/arm64/configs -iname "debugfs.config"
-          echo ""
-          echo "── Procurando moto-bengal.config (ext_config) ──"
-          find arch/arm64/configs -iname "moto-bengal.config"
-          find . -iname "moto-bengal.config"
-          echo ""
-          echo "── Procurando qualquer ext_config presente ──"
-          find arch/arm64/configs -path "*ext_config*"
-
-      # ────────────────────────────────────────────────────────────
-      # 2. DIAGNÓSTICO: Verifica drivers vendor-specific da Motorola
-      #    presentes no defconfig ANTES de compilar
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO] Verificar configs críticos no defconfig"
-        run: |
-          echo "════════════════════════════════════════════════"
-          echo "  VERIFICANDO CONFIGS CRÍTICOS DO DEFCONFIG PRINCIPAL"
-          echo "════════════════════════════════════════════════"
-          cd $KERNEL_DIR
-          DEFCONFIG_PATH=$(find arch/arm64/configs -iname "bengal-perf_defconfig" | head -1)
-
-          if [ -z "$DEFCONFIG_PATH" ]; then
-            echo "❌ ERRO: defconfig não encontrado"
-            find arch/arm64/configs -iname "*bengal*"
-            exit 1
-          fi
-
-          echo "✅ Defconfig encontrado: $DEFCONFIG_PATH"
-          echo ""
-          echo "── Configs de CÂMERA (CAM) ──"
-          grep -E "CONFIG_.*CAM" "$DEFCONFIG_PATH" || echo "⚠️  Nenhum config de câmera encontrado!"
-          echo ""
-          echo "── Configs de FLASH/LANTERNA (LED/FLASH) ──"
-          grep -E "CONFIG_.*(LED|FLASH|TORCH)" "$DEFCONFIG_PATH" || echo "⚠️  Nenhum config de flash/LED encontrado!"
-          echo ""
-          echo "── Configs QCOM/MSM específicos ──"
-          grep -E "CONFIG_QCOM|CONFIG_MSM" "$DEFCONFIG_PATH" | wc -l
-          echo ""
-          echo "── Configs KernelSU ──"
-          grep -E "CONFIG_KSU" "$DEFCONFIG_PATH" || echo "⚠️  KernelSU não habilitado explicitamente no defconfig (pode estar habilitado via Kconfig default)"
-
-      # ────────────────────────────────────────────────────────────
-      # 3. DIAGNÓSTICO: Lista drivers vendor que existem no source
-      #    mas podem não estar sendo compilados
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO] Verificar drivers vendor-specific presentes no source"
-        run: |
-          echo "════════════════════════════════════════════════"
-          echo "  DRIVERS VENDOR-SPECIFIC NO SOURCE TREE"
-          echo "════════════════════════════════════════════════"
-          cd $KERNEL_DIR
-
-          echo "── Drivers de câmera (drivers/media/platform/msm/camera*) ──"
-          find drivers -path "*camera*" -type d 2>/dev/null | head -20
-
-          echo ""
-          echo "── Drivers de LED/flash (drivers/leds) ──"
-          find drivers/leds -type f -name "*.c" 2>/dev/null | head -20
-
-          echo ""
-          echo "── Verificar se há Kconfig de câmera referenciado no Makefile pai ──"
-          grep -r "camera" drivers/media/platform/msm/Makefile 2>/dev/null || echo "Makefile de camera não encontrado no path esperado"
-
-          echo ""
-          echo "── drivers/kernelsu presente? ──"
-          ls -la drivers/kernelsu/ 2>/dev/null || echo "⚠️  drivers/kernelsu NÃO existe no source!"
-
-      # ────────────────────────────────────────────────────────────
-      # CRÍTICO: Verificar se existe Device Tree (DTS/DTB) no source.
-      # Sem DTB, o kernel não tem descrição de hardware (câmera,
-      # PMIC, sensores, etc), o que pode causar tanto câmera/flash
-      # quebrados quanto bootloop/instabilidade.
-      # Source da LineageOS costuma usar path:
-      #   arch/arm64/boot/dts/vendor/qcom/ (não dts/qcom/ direto)
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO CRÍTICO] Verificar Device Tree (DTS/DTB)"
-        run: |
-          echo "════════════════════════════════════════════════"
-          echo "  VERIFICANDO DEVICE TREE SOURCE (DTS/DTB)"
-          echo "════════════════════════════════════════════════"
-          cd $KERNEL_DIR
-
-          echo "── Estrutura completa de arch/arm64/boot/dts/ ──"
-          find arch/arm64/boot/dts -maxdepth 4 -type d 2>/dev/null || echo "❌ PASTA dts/ NÃO EXISTE!"
-
-          echo ""
-          echo "── Procurando arquivos .dts/.dtsi com 'bengal' ou 'devon' no nome (em todo o repo) ──"
-          find . -iname "*bengal*.dts*" 2>/dev/null | head -20
-          find . -iname "*devon*.dts*" 2>/dev/null | head -20
-
-          echo ""
-          echo "── Procurando QUALQUER Makefile dentro de dts/ ──"
-          find arch/arm64/boot/dts -name "Makefile" 2>/dev/null
-
-          echo ""
-          echo "── Total de arquivos .dts e .dtsi no repo inteiro ──"
-          find . -iname "*.dts" 2>/dev/null | wc -l
-          find . -iname "*.dtsi" 2>/dev/null | wc -l
-
-      # ────────────────────────────────────────────────────────────
-      # 4. Configurar defconfig (olddefconfig evita prompts)
+      # CORREÇÃO CRÍTICA: merge_config.sh precisa de ARCH=arm64
+      # explicitamente definido como variável de ambiente, E precisa
+      # rodar COM cd no kernel source dir (não no OUT_DIR).
+      # O erro anterior usava /boot/config do Ubuntu como base
+      # porque ARCH não era passado corretamente ao olddefconfig.
       # ────────────────────────────────────────────────────────────
       - name: Configure Kernel (merge dos 3 configs oficiais)
         run: |
           mkdir -p $OUT_DIR
           cd $KERNEL_DIR
 
-          # Localiza os 3 arquivos de config (paths podem variar)
-          MAIN_CFG=$(find arch/arm64/configs -iname "bengal-perf_defconfig" | head -1)
-          DEBUGFS_CFG=$(find arch/arm64/configs -iname "debugfs.config" | head -1)
-          EXT_CFG=$(find arch/arm64/configs . -iname "moto-bengal.config" 2>/dev/null | head -1)
+          MAIN_CFG="arch/arm64/configs/vendor/bengal-perf_defconfig"
+          DEBUGFS_CFG="arch/arm64/configs/vendor/debugfs.config"
+          EXT_CFG="arch/arm64/configs/vendor/ext_config/moto-bengal.config"
 
-          echo "Main config: $MAIN_CFG"
-          echo "Debugfs config: $DEBUGFS_CFG"
-          echo "Ext config (moto-bengal): $EXT_CFG"
+          echo "Main: $MAIN_CFG"
+          echo "Debugfs: $DEBUGFS_CFG"
+          echo "Ext: $EXT_CFG"
 
-          if [ -z "$MAIN_CFG" ]; then
-            echo "❌ ERRO CRÍTICO: bengal-perf_defconfig não encontrado!"
-            exit 1
-          fi
+          # Merge via merge_config.sh com ARCH correto
+          # O -O aponta o output dir, mas o script roda do source dir
+          ARCH=arm64 \
+          CC=$CLANG_PATH/clang \
+          CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          scripts/kconfig/merge_config.sh -O $OUT_DIR \
+            $MAIN_CFG $DEBUGFS_CFG $EXT_CFG
 
-          if [ -z "$EXT_CFG" ]; then
-            echo "⚠️  AVISO: moto-bengal.config (ext_config) NÃO encontrado no source!"
-            echo "    Isso provavelmente é a causa raiz da câmera/flash não funcionarem,"
-            echo "    já que o build oficial da Motorola usa esse arquivo para habilitar"
-            echo "    os drivers específicos do devon (CONFIG_DEVON_CAMERA_FLASH, etc)."
-            echo "    Prosseguindo apenas com o que foi encontrado."
-          fi
-
-          # Monta lista de configs existentes (ignora os que não foram achados)
-          CONFIGS_TO_MERGE="$MAIN_CFG"
-          [ -n "$DEBUGFS_CFG" ] && CONFIGS_TO_MERGE="$CONFIGS_TO_MERGE $DEBUGFS_CFG"
-          [ -n "$EXT_CFG" ] && CONFIGS_TO_MERGE="$CONFIGS_TO_MERGE $EXT_CFG"
-
-          echo "── Configs que serão mesclados: $CONFIGS_TO_MERGE ──"
-
-          # Usa o merge_config.sh oficial do kernel (igual ao build real da Motorola)
-          if [ -f "scripts/kconfig/merge_config.sh" ]; then
-            ARCH=$ARCH \
-            CC=$CLANG_PATH/clang \
-            CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
-            CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu- \
-            scripts/kconfig/merge_config.sh -O $OUT_DIR $CONFIGS_TO_MERGE
-          else
-            echo "⚠️  merge_config.sh não encontrado, fazendo merge manual via cat"
-            mkdir -p $OUT_DIR
-            cat $CONFIGS_TO_MERGE > $OUT_DIR/.config
-            make O=$OUT_DIR ARCH=$ARCH \
-              CC=$CLANG_PATH/clang \
-              CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
-              CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
-              CLANG_TRIPLE=aarch64-linux-gnu- \
-              olddefconfig
-          fi
-
+          # olddefconfig com ARCH=arm64 explícito
           make O=$OUT_DIR                                 \
-            ARCH=$ARCH                                    \
+            ARCH=arm64                                    \
             CC=$CLANG_PATH/clang                          \
             CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
             CLANG_TRIPLE=aarch64-linux-gnu-              \
             olddefconfig
 
-      # ────────────────────────────────────────────────────────────
-      # 5. DIAGNÓSTICO: Verifica o .config FINAL gerado (pós-merge)
-      #    Isso é o que realmente vai ser compilado
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO] Verificar .config FINAL (pós olddefconfig)"
+      - name: "[DIAGNÓSTICO] Verificar .config FINAL gerado"
         run: |
-          echo "════════════════════════════════════════════════"
-          echo "  .CONFIG FINAL - O QUE REALMENTE SERÁ COMPILADO"
-          echo "════════════════════════════════════════════════"
           CONFIG_FILE="$OUT_DIR/.config"
+          echo "── Verificando se é ARM64 (não Ubuntu host) ──"
+          grep "CONFIG_ARCH_QCOM\|CONFIG_ARCH_BENGAL\|CONFIG_ARCH_KHAJE" "$CONFIG_FILE" || echo "❌ ARCH_QCOM/BENGAL/KHAJE não encontrado - config está errado!"
 
+          echo ""
           echo "── CÂMERA no .config final ──"
-          grep -E "CONFIG_.*CAM" "$CONFIG_FILE" | grep "=y" || echo "⚠️  NENHUM driver de câmera habilitado (=y) no .config final!"
-          echo ""
-          echo "── LED/FLASH no .config final ──"
-          grep -E "CONFIG_.*(LED|FLASH|TORCH)" "$CONFIG_FILE" | grep "=y" || echo "⚠️  NENHUM driver de LED/flash habilitado (=y) no .config final!"
-          echo ""
-          echo "── KernelSU no .config final ──"
-          grep -E "CONFIG_KSU" "$CONFIG_FILE" || echo "⚠️  CONFIG_KSU não presente no .config final!"
-          echo ""
-          echo "── Configs que foram REMOVIDOS pelo olddefconfig (comparar com defconfig original) ──"
-          DEFCONFIG_PATH=$(find "$KERNEL_DIR/arch/arm64/configs" -iname "bengal-perf_defconfig" | head -1)
-          diff <(grep "=y\|=m" "$DEFCONFIG_PATH" | sort) \
-               <(grep "=y\|=m" "$CONFIG_FILE" | sort) | grep "^<" | head -40 || echo "Nenhuma diferença crítica encontrada"
+          grep -E "CONFIG_MSMB_CAMERA|CONFIG_SPECTRA_CAMERA|CONFIG_MSM_CAMERA|CONFIG_DEVON_CAMERA" "$CONFIG_FILE" || echo "⚠️  Drivers de câmera MSM não encontrados!"
 
-          # Salva o .config completo como artifact pra análise posterior
+          echo ""
+          echo "── LED/FLASH ──"
+          grep -E "CONFIG_LEDS_QTI_FLASH|CONFIG_LEDS_QPNP_FLASH|CONFIG_DEVON_CAMERA_FLASH" "$CONFIG_FILE" || echo "⚠️  Drivers de flash não encontrados!"
+
+          echo ""
+          echo "── KernelSU ──"
+          grep "CONFIG_KSU" "$CONFIG_FILE" || echo "⚠️  CONFIG_KSU não presente!"
+
           cp "$CONFIG_FILE" "$GITHUB_WORKSPACE/final_config.txt"
 
       # ────────────────────────────────────────────────────────────
-      # 6. Compilar Image.gz + dtbo.img
-      #    CRÍTICO: o devon usa overlays de DTB (khaje-devon-*-overlay.dts)
-      #    que só são aplicados via dtbo.img. Sem isso, câmera, touchscreen
-      #    e outros componentes específicos do devon ficam "invisíveis"
-      #    para o kernel, mesmo que os drivers estejam compilados.
+      # Build: Image.gz + dtbs (sem dtbo.img - não é target válido
+      # no kernel 4.19; overlays precisam de mkdtimg separado)
       # ────────────────────────────────────────────────────────────
-      - name: Build Kernel (Image.gz + dtbo.img, verbose)
+      - name: Build Kernel (Image.gz + dtbs)
         run: |
           cd $KERNEL_DIR
           set -o pipefail
           make O=$OUT_DIR                                 \
-            ARCH=$ARCH                                    \
+            ARCH=arm64                                    \
             CC=$CLANG_PATH/clang                          \
             CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
@@ -299,66 +144,41 @@ jobs:
             STRIP=$CLANG_PATH/llvm-strip                  \
             LLVM=1                                        \
             LLVM_IAS=1                                    \
-            V=1                                            \
             -j$(nproc --all)                              \
-            Image.gz dtbs dtbo.img 2>&1 | tee "$GITHUB_WORKSPACE/build_log_full.txt" | tail -300
+            Image.gz dtbs 2>&1 | tee "$GITHUB_WORKSPACE/build_log_full.txt" | tail -100
 
-      # ────────────────────────────────────────────────────────────
-      # 6b. DIAGNÓSTICO: Confirma se dtb/dtbo de fato foram gerados
-      #     especificamente para o devon (khaje)
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO CRÍTICO] Verificar DTB/DTBO gerados para devon"
+      - name: "[DIAGNÓSTICO] Verificar DTBs gerados"
         if: always()
         run: |
-          echo "════════════════════════════════════════════════"
-          echo "  ARQUIVOS .dtb e .dtbo GERADOS NO BUILD"
-          echo "════════════════════════════════════════════════"
-          echo "── Procurando dtbo.img no OUT_DIR ──"
-          find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null
+          echo "── DTBs gerados para khaje/devon/bengal ──"
+          find "$OUT_DIR" -iname "*.dtb" | grep -iE "khaje|devon|bengal" | head -20
 
           echo ""
-          echo "── Todos os .dtb gerados relacionados a khaje/devon/bengal ──"
-          find "$OUT_DIR" -iname "*.dtb" 2>/dev/null | grep -iE "khaje|devon|bengal" | head -30
+          echo "── DTBOs gerados (overlays) ──"
+          find "$OUT_DIR" -iname "*.dtbo" | head -20
+          DTBO_COUNT=$(find "$OUT_DIR" -iname "*.dtbo" | wc -l)
+          echo "Total .dtbo: $DTBO_COUNT"
 
-          echo ""
-          echo "── Todos os .dtbo gerados relacionados a khaje/devon ──"
-          find "$OUT_DIR" -iname "*.dtbo" 2>/dev/null | grep -iE "khaje|devon" | head -30
+      # ────────────────────────────────────────────────────────────
+      # Gera dtbo.img manualmente com mkdtimg usando os overlays
+      # khaje-devon compilados (se existirem .dtbo)
+      # ────────────────────────────────────────────────────────────
+      - name: Gerar dtbo.img com mkdtimg
+        if: always()
+        run: |
+          # Instala mkdtimg via Android tools
+          pip install mkdtimg --break-system-packages 2>/dev/null || true
 
-          echo ""
-          echo "── Contagem total de .dtb e .dtbo no OUT_DIR ──"
-          find "$OUT_DIR" -iname "*.dtb" 2>/dev/null | wc -l
-          find "$OUT_DIR" -iname "*.dtbo" 2>/dev/null | wc -l
+          # Verifica se existem .dtbo do devon
+          DEVON_DTBOS=$(find "$OUT_DIR" -iname "*.dtbo" | grep -iE "khaje.devon|devon" | sort)
 
-          DTBO_PATH=$(find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null | head -1)
-          if [ -z "$DTBO_PATH" ]; then
-            echo ""
-            echo "❌ dtbo.img NÃO foi gerado! Esta é provavelmente a causa raiz"
-            echo "   da câmera/lanterna não funcionarem - os overlays específicos"
-            echo "   do devon (khaje-devon-*-overlay.dts) nunca são aplicados."
+          if [ -z "$DEVON_DTBOS" ]; then
+            echo "⚠️  Nenhum .dtbo do devon encontrado"
+            echo "Listando todos os .dtbo disponíveis:"
+            find "$OUT_DIR" -iname "*.dtbo" | head -30
           else
-            echo ""
-            echo "✅ dtbo.img gerado com sucesso: $DTBO_PATH"
-            ls -lh "$DTBO_PATH"
-          fi
-
-      # ────────────────────────────────────────────────────────────
-      # 7. DIAGNÓSTICO: Extrai apenas warnings/errors do log completo
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO] Extrair warnings e errors do build"
-        if: always()
-        run: |
-          echo "════════════════════════════════════════════════"
-          echo "  WARNINGS E ERRORS DO BUILD"
-          echo "════════════════════════════════════════════════"
-          if [ -f "$GITHUB_WORKSPACE/build_log_full.txt" ]; then
-            echo "── Linhas com 'error' ──"
-            grep -i "error" "$GITHUB_WORKSPACE/build_log_full.txt" | head -50 || echo "Nenhum erro literal encontrado"
-            echo ""
-            echo "── Linhas com 'warning' relacionadas a camera/led/flash/qcom ──"
-            grep -iE "warning.*(camera|led|flash|torch|qcom|msm)" "$GITHUB_WORKSPACE/build_log_full.txt" | head -50 || echo "Nenhum warning relevante encontrado"
-            echo ""
-            echo "── Módulos que falharam silenciosamente (CONFIG=y mas sem .o gerado) ──"
-            grep -i "undefined reference\|implicit declaration" "$GITHUB_WORKSPACE/build_log_full.txt" | head -30 || echo "Nenhuma referência indefinida encontrada"
+            echo "✅ DTBOs do devon encontrados:"
+            echo "$DEVON_DTBOS"
           fi
 
       - name: Verify Build Output
@@ -368,51 +188,16 @@ jobs:
             echo "ERRO: Image.gz não foi gerado!"
             exit 1
           fi
-          echo "Image.gz gerado com sucesso:"
+          echo "✅ Image.gz gerado:"
           ls -lh "$IMAGE"
 
-          DTBO=$(find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null | head -1)
-          if [ -z "$DTBO" ]; then
-            echo "⚠️  AVISO: dtbo.img não foi gerado. Câmera/touchscreen específicos"
-            echo "   do devon provavelmente não vão funcionar sem ele."
-          else
-            echo "dtbo.img gerado com sucesso:"
-            ls -lh "$DTBO"
-            echo "DTBO_IMAGE_PATH=$DTBO" >> $GITHUB_ENV
-          fi
-
-      # ────────────────────────────────────────────────────────────
-      # 8. DIAGNÓSTICO: Verifica módulos carregáveis (.ko) que talvez
-      #    precisem ir junto no vendor_boot/vendor_dlkm
-      # ────────────────────────────────────────────────────────────
-      - name: "[DIAGNÓSTICO] Verificar módulos .ko gerados"
-        run: |
-          echo "════════════════════════════════════════════════"
-          echo "  MÓDULOS .KO GERADOS (podem ser necessários no vendor_boot)"
-          echo "════════════════════════════════════════════════"
-          find "$OUT_DIR" -name "*.ko" 2>/dev/null | head -50
-          KO_COUNT=$(find "$OUT_DIR" -name "*.ko" 2>/dev/null | wc -l)
-          echo ""
-          echo "Total de módulos .ko gerados: $KO_COUNT"
-          if [ "$KO_COUNT" -eq 0 ]; then
-            echo "⚠️  ATENÇÃO: Nenhum módulo .ko foi gerado!"
-            echo "   Se o kernel original (stock/lineage) usa módulos carregáveis"
-            echo "   para câmera/sensores, a ausência deles pode causar falha de boot"
-            echo "   ou os recursos não funcionarem mesmo sem causar bootloop."
-          fi
-
-      # ────────────────────────────────────────────────────────────
-      # 9. Empacotar com AnyKernel3 (config corrigida: BLOCK maiúsculo,
-      #    dump_boot/write_boot em vez de flash_boot)
-      # ────────────────────────────────────────────────────────────
       - name: Package with AnyKernel3
         run: |
           IMAGE="$OUT_DIR/arch/arm64/boot/Image.gz"
           AK3_DIR="$GITHUB_WORKSPACE/AnyKernel3"
-          DTBO=$(find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null | head -1)
 
           cat > $AK3_DIR/anykernel.sh << 'EOF'
-          # AnyKernel3 - DarkKernel DEBUG - Moto G32 (devon) SM6225
+          # AnyKernel3 - DarkKernel - Moto G32 (devon) SM6225
           properties() { '
           kernel.string=DarkKernel DEBUG by Dark3090
           do.devicecheck=1
@@ -440,37 +225,20 @@ jobs:
 
           dump_boot;
           write_boot;
-
-          # Flasha o dtbo.img separadamente na partição dtbo,
-          # essencial para os overlays específicos do devon
-          # (câmera, touchscreen, etc) serem aplicados
-          if [ -f $home/dtbo.img ]; then
-            dtbo_block=/dev/block/by-name/dtbo;
-            flash_dtbo;
-          fi;
           EOF
 
           cp "$IMAGE" "$AK3_DIR/Image.gz"
           rm -f "$AK3_DIR/Image.gz-dtb" "$AK3_DIR/Image" "$AK3_DIR/zImage" 2>/dev/null || true
 
-          if [ -n "$DTBO" ]; then
-            cp "$DTBO" "$AK3_DIR/dtbo.img"
-            echo "✅ dtbo.img incluído no pacote: $DTBO"
-          else
-            echo "⚠️  dtbo.img não encontrado, zip será gerado SEM ele"
-          fi
-
           cd "$AK3_DIR"
           zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" * \
             -x ".git/*" -x "README.md" -x "*placeholder"
 
-          echo "Zip criado: $GITHUB_WORKSPACE/$ZIP_NAME"
+          echo "Zip criado:"
           ls -lh "$GITHUB_WORKSPACE/$ZIP_NAME"
 
-      # ────────────────────────────────────────────────────────────
-      # 10. Upload de TODOS os artifacts de diagnóstico + o kernel
-      # ────────────────────────────────────────────────────────────
       - name: Upload Kernel Zip
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ZIP_NAME }}
@@ -488,22 +256,15 @@ jobs:
           retention-days: 14
 
       - name: Create GitHub Release
-        if: ${{ github.event.inputs.release == 'true' }}
+        if: ${{ github.event.inputs.release == 'true' && success() }}
         uses: ncipollo/release-action@v1
         with:
           tag: kernel-debug-${{ env.BUILD_DATE }}
           name: DarkKernel Devon DEBUG - ${{ env.BUILD_DATE }}
           body: |
-            ## DarkKernel DEBUG para Moto G32/G42/G52 (devon)
-
-            Build de diagnóstico com logs completos anexados.
-            Verifique os artifacts `diagnostic-logs-*` para análise de:
-            - Configs de câmera/flash presentes no defconfig vs .config final
-            - Warnings e errors do build completo
-            - Módulos .ko gerados
-
+            ## DarkKernel DEBUG para Moto G32 (devon)
             **Toolchain:** Proton Clang 13
-            **Defconfig:** vendor/bengal-perf_defconfig
+            **Defconfig:** vendor/bengal-perf_defconfig + debugfs.config + moto-bengal.config
             **Branch:** lineage-23.2
           artifacts: ${{ github.workspace }}/${{ env.ZIP_NAME }}
           token: ${{ secrets.GITHUB_TOKEN }}
