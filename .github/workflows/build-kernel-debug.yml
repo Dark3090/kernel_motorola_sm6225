@@ -275,9 +275,13 @@ jobs:
           cp "$CONFIG_FILE" "$GITHUB_WORKSPACE/final_config.txt"
 
       # ────────────────────────────────────────────────────────────
-      # 6. Compilar com VERBOSE=1 para capturar todos os warnings
+      # 6. Compilar Image.gz + dtbo.img
+      #    CRÍTICO: o devon usa overlays de DTB (khaje-devon-*-overlay.dts)
+      #    que só são aplicados via dtbo.img. Sem isso, câmera, touchscreen
+      #    e outros componentes específicos do devon ficam "invisíveis"
+      #    para o kernel, mesmo que os drivers estejam compilados.
       # ────────────────────────────────────────────────────────────
-      - name: Build Kernel (Image.gz, verbose)
+      - name: Build Kernel (Image.gz + dtbo.img, verbose)
         run: |
           cd $KERNEL_DIR
           set -o pipefail
@@ -297,7 +301,45 @@ jobs:
             LLVM_IAS=1                                    \
             V=1                                            \
             -j$(nproc --all)                              \
-            Image.gz 2>&1 | tee "$GITHUB_WORKSPACE/build_log_full.txt" | tail -200
+            Image.gz dtbs dtbo.img 2>&1 | tee "$GITHUB_WORKSPACE/build_log_full.txt" | tail -300
+
+      # ────────────────────────────────────────────────────────────
+      # 6b. DIAGNÓSTICO: Confirma se dtb/dtbo de fato foram gerados
+      #     especificamente para o devon (khaje)
+      # ────────────────────────────────────────────────────────────
+      - name: "[DIAGNÓSTICO CRÍTICO] Verificar DTB/DTBO gerados para devon"
+        if: always()
+        run: |
+          echo "════════════════════════════════════════════════"
+          echo "  ARQUIVOS .dtb e .dtbo GERADOS NO BUILD"
+          echo "════════════════════════════════════════════════"
+          echo "── Procurando dtbo.img no OUT_DIR ──"
+          find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null
+
+          echo ""
+          echo "── Todos os .dtb gerados relacionados a khaje/devon/bengal ──"
+          find "$OUT_DIR" -iname "*.dtb" 2>/dev/null | grep -iE "khaje|devon|bengal" | head -30
+
+          echo ""
+          echo "── Todos os .dtbo gerados relacionados a khaje/devon ──"
+          find "$OUT_DIR" -iname "*.dtbo" 2>/dev/null | grep -iE "khaje|devon" | head -30
+
+          echo ""
+          echo "── Contagem total de .dtb e .dtbo no OUT_DIR ──"
+          find "$OUT_DIR" -iname "*.dtb" 2>/dev/null | wc -l
+          find "$OUT_DIR" -iname "*.dtbo" 2>/dev/null | wc -l
+
+          DTBO_PATH=$(find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null | head -1)
+          if [ -z "$DTBO_PATH" ]; then
+            echo ""
+            echo "❌ dtbo.img NÃO foi gerado! Esta é provavelmente a causa raiz"
+            echo "   da câmera/lanterna não funcionarem - os overlays específicos"
+            echo "   do devon (khaje-devon-*-overlay.dts) nunca são aplicados."
+          else
+            echo ""
+            echo "✅ dtbo.img gerado com sucesso: $DTBO_PATH"
+            ls -lh "$DTBO_PATH"
+          fi
 
       # ────────────────────────────────────────────────────────────
       # 7. DIAGNÓSTICO: Extrai apenas warnings/errors do log completo
@@ -329,6 +371,16 @@ jobs:
           echo "Image.gz gerado com sucesso:"
           ls -lh "$IMAGE"
 
+          DTBO=$(find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null | head -1)
+          if [ -z "$DTBO" ]; then
+            echo "⚠️  AVISO: dtbo.img não foi gerado. Câmera/touchscreen específicos"
+            echo "   do devon provavelmente não vão funcionar sem ele."
+          else
+            echo "dtbo.img gerado com sucesso:"
+            ls -lh "$DTBO"
+            echo "DTBO_IMAGE_PATH=$DTBO" >> $GITHUB_ENV
+          fi
+
       # ────────────────────────────────────────────────────────────
       # 8. DIAGNÓSTICO: Verifica módulos carregáveis (.ko) que talvez
       #    precisem ir junto no vendor_boot/vendor_dlkm
@@ -357,6 +409,7 @@ jobs:
         run: |
           IMAGE="$OUT_DIR/arch/arm64/boot/Image.gz"
           AK3_DIR="$GITHUB_WORKSPACE/AnyKernel3"
+          DTBO=$(find "$OUT_DIR" -iname "dtbo.img" 2>/dev/null | head -1)
 
           cat > $AK3_DIR/anykernel.sh << 'EOF'
           # AnyKernel3 - DarkKernel DEBUG - Moto G32 (devon) SM6225
@@ -387,10 +440,25 @@ jobs:
 
           dump_boot;
           write_boot;
+
+          # Flasha o dtbo.img separadamente na partição dtbo,
+          # essencial para os overlays específicos do devon
+          # (câmera, touchscreen, etc) serem aplicados
+          if [ -f $home/dtbo.img ]; then
+            dtbo_block=/dev/block/by-name/dtbo;
+            flash_dtbo;
+          fi;
           EOF
 
           cp "$IMAGE" "$AK3_DIR/Image.gz"
           rm -f "$AK3_DIR/Image.gz-dtb" "$AK3_DIR/Image" "$AK3_DIR/zImage" 2>/dev/null || true
+
+          if [ -n "$DTBO" ]; then
+            cp "$DTBO" "$AK3_DIR/dtbo.img"
+            echo "✅ dtbo.img incluído no pacote: $DTBO"
+          else
+            echo "⚠️  dtbo.img não encontrado, zip será gerado SEM ele"
+          fi
 
           cd "$AK3_DIR"
           zip -r9 "$GITHUB_WORKSPACE/$ZIP_NAME" * \
