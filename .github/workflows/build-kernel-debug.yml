@@ -58,7 +58,6 @@ jobs:
         run: |
           echo "ARCH=arm64"                              >> $GITHUB_ENV
           echo "SUBARCH=arm64"                           >> $GITHUB_ENV
-          echo "DEFCONFIG=vendor/bengal-perf_defconfig" >> $GITHUB_ENV
           echo "KERNEL_DIR=$GITHUB_WORKSPACE/kernel"    >> $GITHUB_ENV
           echo "OUT_DIR=$GITHUB_WORKSPACE/out"          >> $GITHUB_ENV
           echo "KBUILD_BUILD_USER=Dark3090"             >> $GITHUB_ENV
@@ -68,19 +67,45 @@ jobs:
           echo "ZIP_NAME=DarkKernel-devon-DEBUG-${DATE}.zip" >> $GITHUB_ENV
 
       # ────────────────────────────────────────────────────────────
+      # IMPORTANTE: O build oficial da Motorola usa TRÊS configs
+      # combinados via merge_config.sh, não só o defconfig principal:
+      #   vendor/bengal-perf_defconfig
+      #   vendor/debugfs.config
+      #   vendor/ext_config/moto-bengal.config  <- configs específicos
+      #     do devon (câmera, flash, etc) ficam aqui
+      # Fonte: BoardConfigCommon.mk do device tree oficial
+      # ────────────────────────────────────────────────────────────
+      - name: "[DIAGNÓSTICO] Localizar todos os arquivos de config relevantes"
+        run: |
+          cd $KERNEL_DIR
+          echo "── Procurando bengal-perf_defconfig ──"
+          find arch/arm64/configs -iname "bengal-perf_defconfig"
+          echo ""
+          echo "── Procurando debugfs.config ──"
+          find arch/arm64/configs -iname "debugfs.config"
+          echo ""
+          echo "── Procurando moto-bengal.config (ext_config) ──"
+          find arch/arm64/configs -iname "moto-bengal.config"
+          find . -iname "moto-bengal.config"
+          echo ""
+          echo "── Procurando qualquer ext_config presente ──"
+          find arch/arm64/configs -path "*ext_config*"
+
+      # ────────────────────────────────────────────────────────────
       # 2. DIAGNÓSTICO: Verifica drivers vendor-specific da Motorola
       #    presentes no defconfig ANTES de compilar
       # ────────────────────────────────────────────────────────────
       - name: "[DIAGNÓSTICO] Verificar configs críticos no defconfig"
         run: |
           echo "════════════════════════════════════════════════"
-          echo "  VERIFICANDO CONFIGS CRÍTICOS DO DEFCONFIG"
+          echo "  VERIFICANDO CONFIGS CRÍTICOS DO DEFCONFIG PRINCIPAL"
           echo "════════════════════════════════════════════════"
-          DEFCONFIG_PATH="$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG"
+          cd $KERNEL_DIR
+          DEFCONFIG_PATH=$(find arch/arm64/configs -iname "bengal-perf_defconfig" | head -1)
 
-          if [ ! -f "$DEFCONFIG_PATH" ]; then
-            echo "❌ ERRO: defconfig não encontrado em $DEFCONFIG_PATH"
-            find $KERNEL_DIR/arch/arm64/configs -iname "*bengal*"
+          if [ -z "$DEFCONFIG_PATH" ]; then
+            echo "❌ ERRO: defconfig não encontrado"
+            find arch/arm64/configs -iname "*bengal*"
             exit 1
           fi
 
@@ -125,19 +150,94 @@ jobs:
           ls -la drivers/kernelsu/ 2>/dev/null || echo "⚠️  drivers/kernelsu NÃO existe no source!"
 
       # ────────────────────────────────────────────────────────────
+      # CRÍTICO: Verificar se existe Device Tree (DTS/DTB) no source.
+      # Sem DTB, o kernel não tem descrição de hardware (câmera,
+      # PMIC, sensores, etc), o que pode causar tanto câmera/flash
+      # quebrados quanto bootloop/instabilidade.
+      # Source da LineageOS costuma usar path:
+      #   arch/arm64/boot/dts/vendor/qcom/ (não dts/qcom/ direto)
+      # ────────────────────────────────────────────────────────────
+      - name: "[DIAGNÓSTICO CRÍTICO] Verificar Device Tree (DTS/DTB)"
+        run: |
+          echo "════════════════════════════════════════════════"
+          echo "  VERIFICANDO DEVICE TREE SOURCE (DTS/DTB)"
+          echo "════════════════════════════════════════════════"
+          cd $KERNEL_DIR
+
+          echo "── Estrutura completa de arch/arm64/boot/dts/ ──"
+          find arch/arm64/boot/dts -maxdepth 4 -type d 2>/dev/null || echo "❌ PASTA dts/ NÃO EXISTE!"
+
+          echo ""
+          echo "── Procurando arquivos .dts/.dtsi com 'bengal' ou 'devon' no nome (em todo o repo) ──"
+          find . -iname "*bengal*.dts*" 2>/dev/null | head -20
+          find . -iname "*devon*.dts*" 2>/dev/null | head -20
+
+          echo ""
+          echo "── Procurando QUALQUER Makefile dentro de dts/ ──"
+          find arch/arm64/boot/dts -name "Makefile" 2>/dev/null
+
+          echo ""
+          echo "── Total de arquivos .dts e .dtsi no repo inteiro ──"
+          find . -iname "*.dts" 2>/dev/null | wc -l
+          find . -iname "*.dtsi" 2>/dev/null | wc -l
+
+      # ────────────────────────────────────────────────────────────
       # 4. Configurar defconfig (olddefconfig evita prompts)
       # ────────────────────────────────────────────────────────────
-      - name: Configure Kernel
+      - name: Configure Kernel (merge dos 3 configs oficiais)
         run: |
           mkdir -p $OUT_DIR
           cd $KERNEL_DIR
-          make O=$OUT_DIR                                 \
-            ARCH=$ARCH                                    \
-            CC=$CLANG_PATH/clang                          \
+
+          # Localiza os 3 arquivos de config (paths podem variar)
+          MAIN_CFG=$(find arch/arm64/configs -iname "bengal-perf_defconfig" | head -1)
+          DEBUGFS_CFG=$(find arch/arm64/configs -iname "debugfs.config" | head -1)
+          EXT_CFG=$(find arch/arm64/configs . -iname "moto-bengal.config" 2>/dev/null | head -1)
+
+          echo "Main config: $MAIN_CFG"
+          echo "Debugfs config: $DEBUGFS_CFG"
+          echo "Ext config (moto-bengal): $EXT_CFG"
+
+          if [ -z "$MAIN_CFG" ]; then
+            echo "❌ ERRO CRÍTICO: bengal-perf_defconfig não encontrado!"
+            exit 1
+          fi
+
+          if [ -z "$EXT_CFG" ]; then
+            echo "⚠️  AVISO: moto-bengal.config (ext_config) NÃO encontrado no source!"
+            echo "    Isso provavelmente é a causa raiz da câmera/flash não funcionarem,"
+            echo "    já que o build oficial da Motorola usa esse arquivo para habilitar"
+            echo "    os drivers específicos do devon (CONFIG_DEVON_CAMERA_FLASH, etc)."
+            echo "    Prosseguindo apenas com o que foi encontrado."
+          fi
+
+          # Monta lista de configs existentes (ignora os que não foram achados)
+          CONFIGS_TO_MERGE="$MAIN_CFG"
+          [ -n "$DEBUGFS_CFG" ] && CONFIGS_TO_MERGE="$CONFIGS_TO_MERGE $DEBUGFS_CFG"
+          [ -n "$EXT_CFG" ] && CONFIGS_TO_MERGE="$CONFIGS_TO_MERGE $EXT_CFG"
+
+          echo "── Configs que serão mesclados: $CONFIGS_TO_MERGE ──"
+
+          # Usa o merge_config.sh oficial do kernel (igual ao build real da Motorola)
+          if [ -f "scripts/kconfig/merge_config.sh" ]; then
+            ARCH=$ARCH \
+            CC=$CLANG_PATH/clang \
             CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
             CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
-            CLANG_TRIPLE=aarch64-linux-gnu-              \
-            $DEFCONFIG
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            scripts/kconfig/merge_config.sh -O $OUT_DIR $CONFIGS_TO_MERGE
+          else
+            echo "⚠️  merge_config.sh não encontrado, fazendo merge manual via cat"
+            mkdir -p $OUT_DIR
+            cat $CONFIGS_TO_MERGE > $OUT_DIR/.config
+            make O=$OUT_DIR ARCH=$ARCH \
+              CC=$CLANG_PATH/clang \
+              CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
+              CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
+              CLANG_TRIPLE=aarch64-linux-gnu- \
+              olddefconfig
+          fi
+
           make O=$OUT_DIR                                 \
             ARCH=$ARCH                                    \
             CC=$CLANG_PATH/clang                          \
@@ -167,7 +267,8 @@ jobs:
           grep -E "CONFIG_KSU" "$CONFIG_FILE" || echo "⚠️  CONFIG_KSU não presente no .config final!"
           echo ""
           echo "── Configs que foram REMOVIDOS pelo olddefconfig (comparar com defconfig original) ──"
-          diff <(grep "=y\|=m" "$KERNEL_DIR/arch/arm64/configs/$DEFCONFIG" | sort) \
+          DEFCONFIG_PATH=$(find "$KERNEL_DIR/arch/arm64/configs" -iname "bengal-perf_defconfig" | head -1)
+          diff <(grep "=y\|=m" "$DEFCONFIG_PATH" | sort) \
                <(grep "=y\|=m" "$CONFIG_FILE" | sort) | grep "^<" | head -40 || echo "Nenhuma diferença crítica encontrada"
 
           # Salva o .config completo como artifact pra análise posterior
