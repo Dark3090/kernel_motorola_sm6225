@@ -35,6 +35,34 @@ jobs:
           path: AnyKernel3
           fetch-depth: 1
 
+      # ────────────────────────────────────────────────────────────
+      # FIX CÂMERA (causa raiz real): o driver de câmera mora em
+      # techpack/camera-bengal/ e NÃO é controlado pelo .config/Kconfig
+      # normal — é controlado pelo Makefile que inclui um arquivo .conf
+      # baseado na arch (CONFIG_ARCH_KHAJE). O khajecamera.conf (usado
+      # no devon) esquece de exportar CONFIG_SPECTRA_CAMERA=y, que é a
+      # variável mestre que libera cam_sensor_module/cam_isp/cam_core/etc
+      # no Makefile do driver (obj-$(CONFIG_SPECTRA_CAMERA) += ...).
+      # Todas as outras variantes (bengal/kona/lito) já têm essa linha;
+      # só o khaje não tem. Corrigimos aqui com um sed idempotente.
+      # ────────────────────────────────────────────────────────────
+      - name: "Fix: adicionar CONFIG_SPECTRA_CAMERA=y no khajecamera.conf"
+        run: |
+          CONF_FILE="$GITHUB_WORKSPACE/kernel/techpack/camera-bengal/config/khajecamera.conf"
+          echo "── Antes do fix ──"
+          cat "$CONF_FILE"
+
+          if grep -q "^export CONFIG_SPECTRA_CAMERA=y" "$CONF_FILE"; then
+            echo "✅ Já contém a linha, nada a fazer."
+          else
+            sed -i '/^export CONFIG_SPECTRA_CAMERA_BENGAL=y/a export CONFIG_SPECTRA_CAMERA=y' "$CONF_FILE"
+            echo "✅ Linha adicionada."
+          fi
+
+          echo ""
+          echo "── Depois do fix ──"
+          cat "$CONF_FILE"
+
       - name: Install Dependencies
         run: |
           sudo apt-get update -qq
@@ -79,6 +107,12 @@ jobs:
       # -> kvm_host.h -> ... -> ftrace.h). Celular não usa KVM, então
       # forçamos "# CONFIG_KVM is not set" como 4º fragment, mesclado
       # por último pra ter prioridade sobre os outros três.
+      #
+      # OBS CÂMERA: o fix de câmera NÃO é feito aqui — câmera nesse
+      # kernel é controlada pelo techpack/camera-bengal (ver step
+      # "Fix: adicionar CONFIG_SPECTRA_CAMERA=y..." acima), não pelos
+      # defconfigs Kconfig tradicionais. MSM_CAMERA/MSMB_CAMERA são
+      # drivers legados irrelevantes pro sensor real do devon.
       # ────────────────────────────────────────────────────────────
       - name: Configure Kernel (merge dos 3 configs oficiais)
         run: |
@@ -128,8 +162,8 @@ jobs:
           grep "^CONFIG_KVM" "$CONFIG_FILE" && echo "❌ KVM ainda ligado!" || echo "✅ KVM desligado"
 
           echo ""
-          echo "── CÂMERA no .config final ──"
-          grep -E "CONFIG_MSMB_CAMERA|CONFIG_SPECTRA_CAMERA|CONFIG_MSM_CAMERA|CONFIG_DEVON_CAMERA" "$CONFIG_FILE" || echo "⚠️  Drivers de câmera MSM não encontrados!"
+          echo "── khajecamera.conf (deve ter CONFIG_SPECTRA_CAMERA=y) ──"
+          grep "CONFIG_SPECTRA_CAMERA" "$KERNEL_DIR/techpack/camera-bengal/config/khajecamera.conf" || echo "❌ Fix não aplicado!"
 
           echo ""
           echo "── LED/FLASH ──"
@@ -166,17 +200,50 @@ jobs:
             -j$(nproc --all)                              \
             Image.gz dtbs 2>&1 | tee "$GITHUB_WORKSPACE/build_log_full.txt" | tail -100
 
+      - name: "[DIAGNÓSTICO] Verificar módulos de câmera compilados"
+        if: always()
+        run: |
+          LOG="$GITHUB_WORKSPACE/build_log_full.txt"
+          {
+            echo ""
+            echo "═══════════════════════════════════════════"
+            echo "  DIAGNÓSTICO CÂMERA (techpack/camera-bengal)"
+            echo "═══════════════════════════════════════════"
+            echo "── Objetos .o compilados em cam_sensor_module ──"
+            find "$OUT_DIR/techpack/camera-bengal" -name "*.o" 2>/dev/null | grep -i sensor | head -20 || echo "Nenhum objeto de sensor encontrado"
+
+            echo ""
+            echo "── Contagem total de .o em techpack/camera-bengal ──"
+            find "$OUT_DIR/techpack/camera-bengal" -name "*.o" 2>/dev/null | wc -l
+
+            echo ""
+            echo "── cam_isp e cam_core compilados? ──"
+            find "$OUT_DIR/techpack/camera-bengal" -path "*cam_isp*" -name "*.o" 2>/dev/null | head -5
+            find "$OUT_DIR/techpack/camera-bengal" -path "*cam_core*" -name "*.o" 2>/dev/null | head -5
+          } | tee -a "$LOG"
+
       - name: "[DIAGNÓSTICO] Verificar DTBs gerados"
         if: always()
         run: |
-          echo "── DTBs gerados para khaje/devon/bengal ──"
-          find "$OUT_DIR" -iname "*.dtb" | grep -iE "khaje|devon|bengal" | head -20
+          LOG="$GITHUB_WORKSPACE/build_log_full.txt"
+          {
+            echo ""
+            echo "═══════════════════════════════════════════"
+            echo "  DIAGNÓSTICO DTB/DTBO"
+            echo "═══════════════════════════════════════════"
+            echo "── DTBs gerados para khaje/devon/bengal ──"
+            find "$OUT_DIR" -iname "*.dtb" | grep -iE "khaje|devon|bengal" || echo "Nenhum .dtb khaje/devon/bengal encontrado"
 
-          echo ""
-          echo "── DTBOs gerados (overlays) ──"
-          find "$OUT_DIR" -iname "*.dtbo" | head -20
-          DTBO_COUNT=$(find "$OUT_DIR" -iname "*.dtbo" | wc -l)
-          echo "Total .dtbo: $DTBO_COUNT"
+            echo ""
+            echo "── Todos os .dtb gerados (primeiros 40) ──"
+            find "$OUT_DIR" -iname "*.dtb" | head -40
+
+            echo ""
+            echo "── DTBOs gerados (overlays) ──"
+            find "$OUT_DIR" -iname "*.dtbo" || echo "Nenhum .dtbo encontrado"
+            DTBO_COUNT=$(find "$OUT_DIR" -iname "*.dtbo" | wc -l)
+            echo "Total .dtbo: $DTBO_COUNT"
+          } | tee -a "$LOG"
 
       # ────────────────────────────────────────────────────────────
       # Gera dtbo.img manualmente com mkdtimg usando os overlays
@@ -185,20 +252,28 @@ jobs:
       - name: Gerar dtbo.img com mkdtimg
         if: always()
         run: |
-          # Instala mkdtimg via Android tools
-          pip install mkdtimg --break-system-packages 2>/dev/null || true
+          LOG="$GITHUB_WORKSPACE/build_log_full.txt"
+          {
+            echo ""
+            echo "═══════════════════════════════════════════"
+            echo "  GERAÇÃO DTBO.IMG"
+            echo "═══════════════════════════════════════════"
 
-          # Verifica se existem .dtbo do devon
-          DEVON_DTBOS=$(find "$OUT_DIR" -iname "*.dtbo" | grep -iE "khaje.devon|devon" | sort)
+            # Instala mkdtimg via Android tools
+            pip install mkdtimg --break-system-packages 2>/dev/null || true
 
-          if [ -z "$DEVON_DTBOS" ]; then
-            echo "⚠️  Nenhum .dtbo do devon encontrado"
-            echo "Listando todos os .dtbo disponíveis:"
-            find "$OUT_DIR" -iname "*.dtbo" | head -30
-          else
-            echo "✅ DTBOs do devon encontrados:"
-            echo "$DEVON_DTBOS"
-          fi
+            # Verifica se existem .dtbo do devon
+            DEVON_DTBOS=$(find "$OUT_DIR" -iname "*.dtbo" | grep -iE "khaje.devon|devon" | sort)
+
+            if [ -z "$DEVON_DTBOS" ]; then
+              echo "⚠️  Nenhum .dtbo do devon encontrado"
+              echo "Listando todos os .dtbo disponíveis:"
+              find "$OUT_DIR" -iname "*.dtbo" | head -30
+            else
+              echo "✅ DTBOs do devon encontrados:"
+              echo "$DEVON_DTBOS"
+            fi
+          } | tee -a "$LOG"
 
       - name: Verify Build Output
         run: |
