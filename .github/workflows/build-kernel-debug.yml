@@ -64,11 +64,21 @@ jobs:
           echo "ZIP_NAME=DarkKernel-devon-DEBUG-${DATE}.zip" >> $GITHUB_ENV
 
       # ────────────────────────────────────────────────────────────
-      # CORREÇÃO CRÍTICA: merge_config.sh precisa de ARCH=arm64
-      # explicitamente definido como variável de ambiente, E precisa
-      # rodar COM cd no kernel source dir (não no OUT_DIR).
-      # O erro anterior usava /boot/config do Ubuntu como base
-      # porque ARCH não era passado corretamente ao olddefconfig.
+      # CORREÇÃO CRÍTICA #1: merge_config.sh SEM a flag "-m" roda um
+      # `alldefconfig` interno próprio que ignora o CC=clang passado
+      # via env var (o Makefile do kernel recalcula CC=$(CROSS_COMPILE)gcc
+      # internamente, já que é atribuição simples "=" e não "?="). Isso
+      # fazia procurar aarch64-linux-gnu-gcc (que não existe na proton-clang)
+      # e falhar silenciosamente, corrompendo o .config final.
+      # Com "-m", o merge_config.sh só mescla os fragments e NÃO roda
+      # alldefconfig — o olddefconfig explícito logo abaixo (que passa
+      # CC como argumento de make, não env var) faz esse trabalho certo.
+      #
+      # CORREÇÃO CRÍTICA #2: os erros de compile em mmu_notifier.h e
+      # ftrace.h só ocorrem com CONFIG_KVM ligado (chain: asm-offsets.c
+      # -> kvm_host.h -> ... -> ftrace.h). Celular não usa KVM, então
+      # forçamos "# CONFIG_KVM is not set" como 4º fragment, mesclado
+      # por último pra ter prioridade sobre os outros três.
       # ────────────────────────────────────────────────────────────
       - name: Configure Kernel (merge dos 3 configs oficiais)
         run: |
@@ -83,17 +93,22 @@ jobs:
           echo "Debugfs: $DEBUGFS_CFG"
           echo "Ext: $EXT_CFG"
 
-          # Merge via merge_config.sh com ARCH correto
-          # O -O aponta o output dir, mas o script roda do source dir
+          # Fragment extra pra forçar KVM desligado (evita crash de compile)
+          KVM_OVERRIDE="$RUNNER_TEMP/disable-kvm.config"
+          echo "# CONFIG_KVM is not set" > "$KVM_OVERRIDE"
+          echo "Override: $KVM_OVERRIDE (CONFIG_KVM off)"
+
+          # Merge via merge_config.sh com -m (não roda alldefconfig interno)
           ARCH=arm64 \
           CC=$CLANG_PATH/clang \
           CROSS_COMPILE=$CLANG_PATH/aarch64-linux-gnu- \
           CROSS_COMPILE_ARM32=$CLANG_PATH/arm-linux-gnueabi- \
           CLANG_TRIPLE=aarch64-linux-gnu- \
-          scripts/kconfig/merge_config.sh -O $OUT_DIR \
-            $MAIN_CFG $DEBUGFS_CFG $EXT_CFG
+          scripts/kconfig/merge_config.sh -m -O $OUT_DIR \
+            $MAIN_CFG $DEBUGFS_CFG $EXT_CFG $KVM_OVERRIDE
 
-          # olddefconfig com ARCH=arm64 explícito
+          # olddefconfig com ARCH e CC passados como argumento de make
+          # (isto sim tem prioridade sobre a atribuição do Makefile)
           make O=$OUT_DIR                                 \
             ARCH=arm64                                    \
             CC=$CLANG_PATH/clang                          \
@@ -107,6 +122,10 @@ jobs:
           CONFIG_FILE="$OUT_DIR/.config"
           echo "── Verificando se é ARM64 (não Ubuntu host) ──"
           grep "CONFIG_ARCH_QCOM\|CONFIG_ARCH_BENGAL\|CONFIG_ARCH_KHAJE" "$CONFIG_FILE" || echo "❌ ARCH_QCOM/BENGAL/KHAJE não encontrado - config está errado!"
+
+          echo ""
+          echo "── CONFIG_KVM (deve estar OFF) ──"
+          grep "^CONFIG_KVM" "$CONFIG_FILE" && echo "❌ KVM ainda ligado!" || echo "✅ KVM desligado"
 
           echo ""
           echo "── CÂMERA no .config final ──"
