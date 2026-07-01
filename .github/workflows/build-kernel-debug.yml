@@ -128,9 +128,17 @@ jobs:
           echo "Ext: $EXT_CFG"
 
           # Fragment extra pra forçar KVM desligado (evita crash de compile)
+          # e ligar CONFIG_DEVON_DTB=y (necessário pro Makefile de
+          # arch/arm64/boot/dts/vendor/qcom/Makefile incluir os overlays
+          # khaje-devon-*.dtbo no build — sem isso, dtbo-$(CONFIG_DEVON_DTB)
+          # fica vazio e NENHUM device tree do devon é compilado, mesmo com
+          # CONFIG_MMI_DEVICE_DTBS=y. depends on ARCH_QCOM, já satisfeito.)
           KVM_OVERRIDE="$RUNNER_TEMP/disable-kvm.config"
-          echo "# CONFIG_KVM is not set" > "$KVM_OVERRIDE"
-          echo "Override: $KVM_OVERRIDE (CONFIG_KVM off)"
+          cat > "$KVM_OVERRIDE" << 'EOF'
+          # CONFIG_KVM is not set
+          CONFIG_DEVON_DTB=y
+          EOF
+          echo "Override: $KVM_OVERRIDE (CONFIG_KVM off, CONFIG_DEVON_DTB on)"
 
           # Merge via merge_config.sh com -m (não roda alldefconfig interno)
           ARCH=arm64 \
@@ -162,7 +170,8 @@ jobs:
           grep "^CONFIG_KVM" "$CONFIG_FILE" && echo "❌ KVM ainda ligado!" || echo "✅ KVM desligado"
 
           echo ""
-          echo "── khajecamera.conf (deve ter CONFIG_SPECTRA_CAMERA=y) ──"
+          echo "── CONFIG_DEVON_DTB (deve estar =y) ──"
+          grep "^CONFIG_DEVON_DTB" "$CONFIG_FILE" && echo "✅ DEVON_DTB ligado" || echo "❌ DEVON_DTB não está =y — dtbs vai sair vazio!"
           grep "CONFIG_SPECTRA_CAMERA" "$KERNEL_DIR/techpack/camera-bengal/config/khajecamera.conf" || echo "❌ Fix não aplicado!"
 
           echo ""
